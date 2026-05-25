@@ -939,6 +939,64 @@ func TestDropFunctionIfExistsUsesCatalogWithNamePath(t *testing.T) {
 	}
 }
 
+// TestUnqualifiedTableResolvesToConnectionProject verifies that a
+// table reference without an explicit project resolves within the
+// connection's name-path project.
+func TestUnqualifiedTableResolvesToConnectionProject(t *testing.T) {
+	db, err := sql.Open("googlesqlite", ":memory:?_test=cross_project")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	sqlConn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("Conn: %v", err)
+	}
+	defer sqlConn.Close()
+
+	exec := func(q string) {
+		t.Helper()
+		if _, err := sqlConn.ExecContext(ctx, q); err != nil {
+			t.Fatalf("exec %q: %v", q, err)
+		}
+	}
+
+	// Same dataset.table under two projects; data only in project_b.
+	exec("CREATE TABLE `project_a.ds.t` (id STRING)")
+	exec("CREATE TABLE `project_b.ds.t` (id STRING)")
+	exec("INSERT INTO `project_b.ds.t` (id) VALUES ('x')")
+
+	withRawConn(t, sqlConn, func(c *googlesqlite.Conn) {
+		if err := c.SetNamePath([]string{"project_b"}); err != nil {
+			t.Fatalf("SetNamePath: %v", err)
+		}
+		c.SetMaxNamePath(3)
+	})
+
+	// qualified reference must see the row in project_b.
+	var qualified int64
+	if err := sqlConn.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM `project_b.ds.t`").Scan(&qualified); err != nil {
+		t.Fatalf("qualified query: %v", err)
+	}
+	if qualified != 1 {
+		t.Fatalf("qualified count = %d; want 1", qualified)
+	}
+
+	// An unqualified reference must also see the row in project_b,
+	// since the connection's name path is set to project_b.
+	var unqualified int64
+	if err := sqlConn.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM `ds.t`").Scan(&unqualified); err != nil {
+		t.Fatalf("unqualified query: %v", err)
+	}
+	if unqualified != 1 {
+		t.Fatalf("unqualified `ds.t` count = %d; want 1 (resolved to wrong project)", unqualified)
+	}
+}
+
 // TestExplainModeRunsExplainQueryPlan flips the connection's
 // explain-mode flag, then runs a SELECT. With explain mode on, the
 // QueryStmtAction.QueryContext branches into ExplainQueryPlan and
