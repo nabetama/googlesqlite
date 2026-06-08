@@ -958,6 +958,7 @@ func TestUnqualifiedTableResolvesToConnectionProject(t *testing.T) {
 
 	exec := func(q string) {
 		t.Helper()
+		// driver.go::Conn.ExecContext
 		if _, err := sqlConn.ExecContext(ctx, q); err != nil {
 			t.Fatalf("exec %q: %v", q, err)
 		}
