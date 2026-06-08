@@ -958,7 +958,7 @@ func TestUnqualifiedTableResolvesToConnectionProject(t *testing.T) {
 
 	exec := func(q string) {
 		t.Helper()
-		// driver.go::Conn.ExecContext
+		// sql.go:129 init()で登録した driver を database/sql の registry から呼び出す
 		if _, err := sqlConn.ExecContext(ctx, q); err != nil {
 			t.Fatalf("exec %q: %v", q, err)
 		}
