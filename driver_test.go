@@ -997,6 +997,123 @@ func TestUnqualifiedTableResolvesToConnectionProject(t *testing.T) {
 	}
 }
 
+// TestNamePathTableResolutionDoesNotOverrideCTE keeps NamePath table
+// resolution in the catalog layer instead of rewriting SQL text before
+// analysis. Query-local CTE names must keep shadowing catalog tables.
+func TestNamePathTableResolutionDoesNotOverrideCTE(t *testing.T) {
+	db, err := sql.Open("googlesqlite", ":memory:?_test=name_path_cte_shadow")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	sqlConn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("Conn: %v", err)
+	}
+	defer sqlConn.Close()
+
+	if _, err := sqlConn.ExecContext(ctx, "CREATE TABLE `project_b.ds.t` (id STRING)"); err != nil {
+		t.Fatalf("CREATE TABLE: %v", err)
+	}
+	if _, err := sqlConn.ExecContext(ctx, "INSERT INTO `project_b.ds.t` VALUES ('table')"); err != nil {
+		t.Fatalf("INSERT: %v", err)
+	}
+	withRawConn(t, sqlConn, func(c *googlesqlite.Conn) {
+		c.SetMaxNamePath(3)
+		if err := c.SetNamePath([]string{"project_b", "ds"}); err != nil {
+			t.Fatalf("SetNamePath: %v", err)
+		}
+	})
+
+	var got string
+	if err := sqlConn.QueryRowContext(ctx,
+		"WITH t AS (SELECT 'cte' AS id) SELECT id FROM t").Scan(&got); err != nil {
+		t.Fatalf("CTE query: %v", err)
+	}
+	if got != "cte" {
+		t.Fatalf("CTE query got %q; want cte", got)
+	}
+}
+
+// TestNamePathTableResolutionDoesNotFallbackToOtherProject verifies that a
+// missing table in the active NamePath does not resolve through a root alias
+// owned by another project.
+func TestNamePathTableResolutionDoesNotFallbackToOtherProject(t *testing.T) {
+	db, err := sql.Open("googlesqlite", ":memory:?_test=name_path_no_cross_project_fallback")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	sqlConn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("Conn: %v", err)
+	}
+	defer sqlConn.Close()
+
+	if _, err := sqlConn.ExecContext(ctx, "CREATE TABLE `project_a.ds.t` (id STRING)"); err != nil {
+		t.Fatalf("CREATE TABLE: %v", err)
+	}
+	if _, err := sqlConn.ExecContext(ctx, "INSERT INTO `project_a.ds.t` VALUES ('wrong')"); err != nil {
+		t.Fatalf("INSERT: %v", err)
+	}
+	withRawConn(t, sqlConn, func(c *googlesqlite.Conn) {
+		c.SetMaxNamePath(3)
+		if err := c.SetNamePath([]string{"project_b"}); err != nil {
+			t.Fatalf("SetNamePath: %v", err)
+		}
+	})
+
+	var got int64
+	if err := sqlConn.QueryRowContext(ctx, "SELECT COUNT(*) FROM `ds.t`").Scan(&got); err == nil {
+		t.Fatalf("unqualified query resolved through another project; got %d", got)
+	}
+}
+
+func TestNamePathWildcardTableResolvesWithinProject(t *testing.T) {
+	db, err := sql.Open("googlesqlite", ":memory:?_test=name_path_wildcard_project")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	sqlConn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("Conn: %v", err)
+	}
+	defer sqlConn.Close()
+
+	exec := func(q string) {
+		t.Helper()
+		if _, err := sqlConn.ExecContext(ctx, q); err != nil {
+			t.Fatalf("exec %q: %v", q, err)
+		}
+	}
+	exec("CREATE TABLE `project_a.ds.table_a` (id STRING)")
+	exec("CREATE TABLE `project_b.ds.table_a` (id STRING)")
+	exec("INSERT INTO `project_a.ds.table_a` VALUES ('wrong')")
+	exec("INSERT INTO `project_b.ds.table_a` VALUES ('right')")
+	withRawConn(t, sqlConn, func(c *googlesqlite.Conn) {
+		c.SetMaxNamePath(3)
+		if err := c.SetNamePath([]string{"project_b"}); err != nil {
+			t.Fatalf("SetNamePath: %v", err)
+		}
+	})
+
+	var got int64
+	if err := sqlConn.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM `ds.table_*` WHERE id = 'right'").Scan(&got); err != nil {
+		t.Fatalf("wildcard query: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("wildcard count = %d; want 1", got)
+	}
+}
+
 // TestExplainModeRunsExplainQueryPlan flips the connection's
 // explain-mode flag, then runs a SELECT. With explain mode on, the
 // QueryStmtAction.QueryContext branches into ExplainQueryPlan and
